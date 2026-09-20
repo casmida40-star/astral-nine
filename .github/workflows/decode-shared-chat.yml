@@ -1,0 +1,112 @@
+name: Decode Shared Astral Nine Conversation
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  decode:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install decoder
+        run: |
+          npm init -y
+          npm install turbo-stream@2.4.1
+      - name: Fetch and decode shared conversation
+        env:
+          SHARE_URL: https://chatgpt.com/share/6ab0677c-e7b0-83ea-b514-dd2fe677abd2
+        run: |
+          mkdir -p decoded
+          curl -L --compressed --max-time 120 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36' "$SHARE_URL" -o decoded/raw.html
+          cat > decode.mjs <<'JS'
+          import fs from 'fs';
+          import { decode } from 'turbo-stream';
+
+          const html = fs.readFileSync('decoded/raw.html', 'utf8');
+          const chunks = [];
+          const re = /streamController\.enqueue\(("(?:\\.|[^"\\])*")\);/gs;
+          for (const match of html.matchAll(re)) {
+            try { chunks.push(JSON.parse(match[1])); }
+            catch (e) { fs.appendFileSync('decoded/extract-errors.txt', String(e)+'\n'); }
+          }
+          fs.writeFileSync('decoded/chunks.json', JSON.stringify(chunks.map((c,i)=>({i,chars:c.length,start:c.slice(0,120),end:c.slice(-120)})), null, 2));
+          fs.writeFileSync('decoded/turbo-stream.txt', chunks.join(''));
+
+          const stream = new ReadableStream({
+            start(controller) {
+              for (const chunk of chunks) controller.enqueue(chunk);
+              controller.close();
+            }
+          });
+          const plugin = (type, ...data) => ({ value: { __turboType: type, data } });
+          let decoded;
+          try {
+            const result = await decode(stream, { plugins: [plugin] });
+            if (result && typeof result === 'object' && 'value' in result && 'done' in result) {
+              decoded = result.value;
+              await result.done;
+            } else {
+              decoded = result;
+            }
+          } catch (e) {
+            fs.writeFileSync('decoded/decode-error.txt', String(e?.stack || e));
+            process.exitCode = 2;
+          }
+
+          function toJsonSafe(value, seen = new WeakMap(), path = '$') {
+            if (value === undefined) return { __undefined: true };
+            if (value === null || typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return value;
+            if (typeof value === 'bigint') return { __bigint: value.toString() };
+            if (typeof value === 'symbol') return { __symbol: String(value) };
+            if (typeof value === 'function') return { __function: value.name || 'anonymous' };
+            if (value instanceof Date) return { __date: value.toISOString() };
+            if (value instanceof URL) return { __url: value.href };
+            if (value instanceof RegExp) return { __regexp: value.source, flags: value.flags };
+            if (value instanceof Error) return { __error: value.name, message: value.message, stack: value.stack };
+            if (value instanceof Map) return { __map: [...value].map(([k,v],i)=>[toJsonSafe(k,seen,path+`.mk${i}`),toJsonSafe(v,seen,path+`.mv${i}`)]) };
+            if (value instanceof Set) return { __set: [...value].map((v,i)=>toJsonSafe(v,seen,path+`.s${i}`)) };
+            if (typeof value?.then === 'function') return { __promise: true };
+            if (typeof value === 'object') {
+              if (seen.has(value)) return { __ref: seen.get(value) };
+              seen.set(value, path);
+              if (Array.isArray(value)) return value.map((v,i)=>toJsonSafe(v,seen,`${path}[${i}]`));
+              const out = {};
+              for (const [k,v] of Object.entries(value)) out[k] = toJsonSafe(v,seen,`${path}.${k}`);
+              return out;
+            }
+            return String(value);
+          }
+
+          if (decoded !== undefined) {
+            const safe = toJsonSafe(decoded);
+            fs.writeFileSync('decoded/decoded.json', JSON.stringify(safe, null, 2));
+            const route = decoded?.loaderData?.['routes/share.$shareId.($action)'] || decoded?.loaderData?.['routes/share.$shareId'] || null;
+            const conversation = route?.serverResponse?.data || route?.serverResponse || route || null;
+            fs.writeFileSync('decoded/route.json', JSON.stringify(toJsonSafe(route), null, 2));
+            fs.writeFileSync('decoded/conversation.json', JSON.stringify(toJsonSafe(conversation), null, 2));
+            fs.writeFileSync('decoded/summary.txt', [
+              `chunks=${chunks.length}`,
+              `rootKeys=${decoded && typeof decoded==='object' ? Object.keys(decoded).join(',') : typeof decoded}`,
+              `routeKeys=${route && typeof route==='object' ? Object.keys(route).join(',') : typeof route}`,
+              `conversationKeys=${conversation && typeof conversation==='object' ? Object.keys(conversation).join(',') : typeof conversation}`,
+            ].join('\n'));
+          }
+          JS
+          node decode.mjs || true
+          find decoded -maxdepth 1 -type f -printf '%f %s bytes\n' | sort > decoded/files.txt
+      - name: Upload decoded conversation
+        uses: actions/upload-artifact@v4
+        with:
+          name: Astral-Nine-Decoded-Conversation
+          path: decoded/
+          if-no-files-found: error
+          retention-days: 7
