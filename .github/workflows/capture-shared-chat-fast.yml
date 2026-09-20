@@ -1,0 +1,59 @@
+name: Fast Capture Shared Astral Nine Chat
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Capture public share page
+        env:
+          SHARE_URL: https://chatgpt.com/share/6ab0677c-e7b0-83ea-b514-dd2fe677abd2
+        shell: bash
+        run: |
+          set -uo pipefail
+          mkdir -p capture-fast
+          curl -L --compressed --max-time 120 -A 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36' "$SHARE_URL" -D capture-fast/headers.txt -o capture-fast/raw.html 2> capture-fast/curl.log || true
+          CHROME="$(command -v google-chrome || command -v google-chrome-stable || command -v chromium || command -v chromium-browser || true)"
+          echo "chrome=$CHROME" > capture-fast/environment.txt
+          if [ -n "$CHROME" ]; then
+            timeout 120 "$CHROME" --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=1440,1200 --virtual-time-budget=30000 --dump-dom "$SHARE_URL" > capture-fast/dom.html 2> capture-fast/chrome-dom.log || true
+            timeout 120 "$CHROME" --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage --window-size=430,932 --virtual-time-budget=30000 --screenshot=capture-fast/page.png "$SHARE_URL" > capture-fast/chrome-shot.log 2>&1 || true
+          fi
+          python - <<'PY'
+          from pathlib import Path
+          import re, json, html
+          out=Path('capture-fast')
+          for fn in ['raw.html','dom.html']:
+              p=out/fn
+              txt=p.read_text('utf-8',errors='replace') if p.exists() else ''
+              (out/(fn+'.size.txt')).write_text(str(len(txt)))
+              urls=sorted(set(re.findall(r'https?://[^\"\'<>\\s]+', txt)))
+              (out/(fn+'.urls.json')).write_text(json.dumps(urls,indent=2))
+              # Pull script payloads and readable text for inspection.
+              scripts=re.findall(r'<script[^>]*>(.*?)</script>',txt,re.I|re.S)
+              (out/(fn+'.scripts.txt')).write_text('\n\n---SCRIPT---\n'.join(scripts))
+              visible=re.sub(r'<script\b[^>]*>.*?</script>',' ',txt,flags=re.I|re.S)
+              visible=re.sub(r'<style\b[^>]*>.*?</style>',' ',visible,flags=re.I|re.S)
+              visible=re.sub(r'<[^>]+>',' ',visible)
+              visible=html.unescape(re.sub(r'\s+',' ',visible)).strip()
+              (out/(fn+'.text.txt')).write_text(visible)
+          PY
+          find capture-fast -maxdepth 1 -type f -printf '%f %s bytes\n' | sort > capture-fast/files.txt
+
+      - name: Upload fast capture
+        uses: actions/upload-artifact@v4
+        with:
+          name: Astral-Nine-Shared-Chat-Fast-Capture
+          path: capture-fast/
+          if-no-files-found: error
+          retention-days: 7

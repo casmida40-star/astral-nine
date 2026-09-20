@@ -2,8 +2,6 @@ name: Capture Shared Astral Nine Chat
 
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
@@ -14,114 +12,16 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
-
       - name: Install Playwright
         run: |
           npm init -y
           npm install playwright
           npx playwright install --with-deps chromium
-
       - name: Capture shared conversation
         env:
           SHARE_URL: https://chatgpt.com/share/6ab0677c-e7b0-83ea-b514-dd2fe677abd2
         run: |
-          # Capture the full public conversation and every visible media asset.
-          cat > capture.mjs <<'JS'
-          import { chromium } from 'playwright';
-          import fs from 'fs';
-          import path from 'path';
-          import crypto from 'crypto';
-
-          const out = path.resolve('capture');
-          fs.mkdirSync(out, { recursive: true });
-          fs.mkdirSync(path.join(out, 'assets'), { recursive: true });
-          const url = process.env.SHARE_URL;
-          const browser = await chromium.launch({ headless: true });
-          const context = await browser.newContext({
-            viewport: { width: 1440, height: 1200 },
-            userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36'
-          });
-          const page = await context.newPage();
-          const responses = [];
-          page.on('response', async (r) => {
-            const u = r.url();
-            const ct = (r.headers()['content-type'] || '').toLowerCase();
-            if (/image|audio|video|application\/json|text\/event-stream/.test(ct) || /backend-api|conversation|share/.test(u)) {
-              responses.push({ url: u, status: r.status(), contentType: ct });
-            }
-          });
-          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
-          await page.waitForTimeout(10000);
-          for (let i = 0; i < 160; i++) {
-            const before = await page.evaluate(() => document.documentElement.scrollHeight);
-            await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
-            await page.waitForTimeout(400);
-            const after = await page.evaluate(() => document.documentElement.scrollHeight);
-            if (after === before && i > 10) break;
-          }
-          await page.evaluate(() => window.scrollTo(0, 0));
-          await page.waitForTimeout(1000);
-          fs.writeFileSync(path.join(out, 'page.html'), await page.content());
-          fs.writeFileSync(path.join(out, 'page.txt'), await page.locator('body').innerText());
-          await page.screenshot({ path: path.join(out, 'page-full.png'), fullPage: true });
-
-          const data = await page.evaluate(() => {
-            const nodes = [...document.querySelectorAll('main article, [data-message-author-role], article')];
-            const messages = nodes.map((el, i) => ({
-              index: i,
-              role: el.getAttribute('data-message-author-role') || el.querySelector('[data-message-author-role]')?.getAttribute('data-message-author-role') || '',
-              text: el.innerText || '',
-              html: el.outerHTML
-            })).filter(m => m.text.trim());
-            const links = [...document.querySelectorAll('a[href]')].map(a => a.href);
-            const imgs = [...document.querySelectorAll('img')].map(img => ({ src: img.currentSrc || img.src, alt: img.alt || '', width: img.naturalWidth, height: img.naturalHeight }));
-            const sources = [...document.querySelectorAll('source[src]')].map(s => s.src);
-            return { title: document.title, url: location.href, messages, links, imgs, sources };
-          });
-          fs.writeFileSync(path.join(out, 'conversation.json'), JSON.stringify(data, null, 2));
-          fs.writeFileSync(path.join(out, 'network.json'), JSON.stringify(responses, null, 2));
-
-          const urls = [...new Set([
-            ...data.imgs.map(x => x.src),
-            ...data.sources,
-            ...responses.filter(x => /image|audio|video/.test(x.contentType)).map(x => x.url)
-          ].filter(Boolean))];
-          const manifest = [];
-          for (const [i, u] of urls.entries()) {
-            try {
-              const resp = await context.request.get(u, { timeout: 60000 });
-              if (!resp.ok()) throw new Error(`HTTP ${resp.status()}`);
-              const body = await resp.body();
-              const ct = (resp.headers()['content-type'] || '').split(';')[0];
-              const extMap = {
-                'image/png': '.png', 'image/jpeg': '.jpg', 'image/webp': '.webp', 'image/gif': '.gif',
-                'image/svg+xml': '.svg', 'audio/mpeg': '.mp3', 'audio/wav': '.wav', 'audio/ogg': '.ogg',
-                'video/mp4': '.mp4', 'video/webm': '.webm'
-              };
-              let ext = extMap[ct] || path.extname(new URL(u).pathname).slice(0, 8) || '.bin';
-              if (!/^\.[a-z0-9]{1,7}$/i.test(ext)) ext = '.bin';
-              const hash = crypto.createHash('sha256').update(body).digest('hex');
-              const file = `${String(i).padStart(4,'0')}_${hash.slice(0,16)}${ext}`;
-              fs.writeFileSync(path.join(out, 'assets', file), body);
-              manifest.push({ url: u, file, bytes: body.length, sha256: hash, contentType: ct, status: resp.status() });
-            } catch (e) {
-              manifest.push({ url: u, error: String(e) });
-            }
-          }
-          fs.writeFileSync(path.join(out, 'asset-manifest.json'), JSON.stringify(manifest, null, 2));
-          await browser.close();
-          JS
-          node capture.mjs
-          find capture -maxdepth 2 -type f -printf '%p %s bytes\n' | sort > capture/files.txt
-
-      - name: Upload capture
-        uses: actions/upload-artifact@v4
-        with:
-          name: Astral-Nine-Shared-Chat-Capture
-          path: capture/
-          if-no-files-found: error
-          retention-days: 7
+          echo 'Manual-only archival workflow. Use fast capture for normal pushes.'
