@@ -41,9 +41,10 @@ jobs:
           fs.writeFileSync('decoded/chunks.json', JSON.stringify(chunks.map((c,i)=>({i,chars:c.length,start:c.slice(0,120),end:c.slice(-120)})), null, 2));
           fs.writeFileSync('decoded/turbo-stream.txt', chunks.join(''));
 
+          const encoder = new TextEncoder();
           const stream = new ReadableStream({
             start(controller) {
-              for (const chunk of chunks) controller.enqueue(chunk);
+              for (const chunk of chunks) controller.enqueue(encoder.encode(chunk));
               controller.close();
             }
           });
