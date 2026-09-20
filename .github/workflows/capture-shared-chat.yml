@@ -29,6 +29,7 @@ jobs:
         env:
           SHARE_URL: https://chatgpt.com/share/6ab0677c-e7b0-83ea-b514-dd2fe677abd2
         run: |
+          # Capture the full public conversation and every visible media asset.
           cat > capture.mjs <<'JS'
           import { chromium } from 'playwright';
           import fs from 'fs';
@@ -55,7 +56,6 @@ jobs:
           });
           await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 120000 });
           await page.waitForTimeout(10000);
-          // Repeatedly scroll to load the entire long conversation.
           for (let i = 0; i < 160; i++) {
             const before = await page.evaluate(() => document.documentElement.scrollHeight);
             await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight));
@@ -85,7 +85,6 @@ jobs:
           fs.writeFileSync(path.join(out, 'conversation.json'), JSON.stringify(data, null, 2));
           fs.writeFileSync(path.join(out, 'network.json'), JSON.stringify(responses, null, 2));
 
-          // Download all visible image/audio/video URLs from the page with the page's cookies and headers.
           const urls = [...new Set([
             ...data.imgs.map(x => x.src),
             ...data.sources,
