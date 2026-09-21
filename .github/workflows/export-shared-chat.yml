@@ -1,0 +1,156 @@
+name: Export Shared Chat
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch shared conversation and referenced assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p export/assets
+          SHARE_ID='6ab0677c-e7b0-83ea-b514-dd2fe677abd2'
+          API_URL="https://chatgpt.com/backend-api/share/${SHARE_ID}"
+          PAGE_URL="https://chatgpt.com/share/${SHARE_ID}"
+
+          curl --fail --location --compressed --retry 3 --connect-timeout 30 --max-time 180 \
+            -H 'Accept: application/json,text/plain,*/*' \
+            -H 'User-Agent: Mozilla/5.0 (Linux; Android 16; Pixel 9 Pro) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36' \
+            "$API_URL" -o export/share.json
+
+          curl --fail --location --compressed --retry 3 --connect-timeout 30 --max-time 180 \
+            -H 'Accept: text/html,application/xhtml+xml' \
+            -H 'User-Agent: Mozilla/5.0 (Linux; Android 16; Pixel 9 Pro) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36' \
+            "$PAGE_URL" -o export/share.html || true
+
+          python3 - <<'PY'
+          import json, os, re, pathlib, urllib.parse, urllib.request, hashlib
+          root = pathlib.Path('export')
+          data = json.loads((root/'share.json').read_text('utf-8'))
+
+          # Save an easy-to-inspect pretty JSON copy and a compact structural report.
+          (root/'share.pretty.json').write_text(json.dumps(data, indent=2, ensure_ascii=False), 'utf-8')
+
+          urls = []
+          def walk(x, path='root'):
+              if isinstance(x, dict):
+                  for k, v in x.items():
+                      walk(v, path + '.' + str(k))
+              elif isinstance(x, list):
+                  for i, v in enumerate(x):
+                      walk(v, path + f'[{i}]')
+              elif isinstance(x, str):
+                  # Direct URLs and URLs embedded in markdown/text.
+                  if x.startswith(('http://','https://')):
+                      urls.append((path, x))
+                  for u in re.findall(r'https?://[^\s\]\)\}\>\"\']+', x):
+                      urls.append((path, u.rstrip('.,;')))
+          walk(data)
+
+          # Extract a readable transcript from mapping or message arrays.
+          messages=[]
+          mapping=data.get('mapping') if isinstance(data,dict) else None
+          if isinstance(mapping, dict):
+              for node_id,node in mapping.items():
+                  msg=(node or {}).get('message') if isinstance(node,dict) else None
+                  if not isinstance(msg,dict): continue
+                  author=((msg.get('author') or {}).get('role') or 'unknown')
+                  content=msg.get('content') or {}
+                  parts=content.get('parts') if isinstance(content,dict) else None
+                  if isinstance(parts,list):
+                      text='\n'.join(str(p) for p in parts if isinstance(p,(str,int,float)))
+                  else:
+                      text=str(content)
+                  if text.strip():
+                      messages.append({'id':msg.get('id') or node_id,'role':author,'text':text,'create_time':msg.get('create_time'),'metadata':msg.get('metadata') or {}})
+          # Current share endpoint often nests conversation under a server response.
+          if not messages:
+              def find_message_lists(x):
+                  if isinstance(x,dict):
+                      if isinstance(x.get('mapping'),dict):
+                          return x['mapping']
+                      for v in x.values():
+                          r=find_message_lists(v)
+                          if r: return r
+                  elif isinstance(x,list):
+                      for v in x:
+                          r=find_message_lists(v)
+                          if r: return r
+                  return None
+              mapping=find_message_lists(data)
+              if isinstance(mapping,dict):
+                  for node_id,node in mapping.items():
+                      msg=(node or {}).get('message') if isinstance(node,dict) else None
+                      if not isinstance(msg,dict): continue
+                      author=((msg.get('author') or {}).get('role') or 'unknown')
+                      content=msg.get('content') or {}
+                      parts=content.get('parts') if isinstance(content,dict) else None
+                      text='\n'.join(str(p) for p in parts if isinstance(p,(str,int,float))) if isinstance(parts,list) else str(content)
+                      if text.strip(): messages.append({'id':msg.get('id') or node_id,'role':author,'text':text,'create_time':msg.get('create_time'),'metadata':msg.get('metadata') or {}})
+
+          messages.sort(key=lambda m: (m.get('create_time') is None, m.get('create_time') or 0))
+          md=['# Shared Chat Export','']
+          for i,m in enumerate(messages,1):
+              md += [f"## {i}. {m['role']}", '', m['text'], '']
+          (root/'conversation.md').write_text('\n'.join(md), 'utf-8')
+          (root/'messages.json').write_text(json.dumps(messages,indent=2,ensure_ascii=False),'utf-8')
+
+          # Download every unique plausible media/file URL exposed by the share payload.
+          unique=[]; seen=set()
+          for path,u in urls:
+              u=u.replace('\\u0026','&')
+              if u in seen: continue
+              seen.add(u); unique.append((path,u))
+          (root/'urls.json').write_text(json.dumps([{'path':p,'url':u} for p,u in unique],indent=2),'utf-8')
+
+          log=[]
+          headers={'User-Agent':'Mozilla/5.0 (Linux; Android 16; Pixel 9 Pro) AppleWebKit/537.36 Chrome/140 Mobile Safari/537.36'}
+          for idx,(path,u) in enumerate(unique):
+              low=u.lower()
+              plausible = any(s in low for s in ['oaidalleapiprodscus.blob.core.windows.net','files.oaiusercontent.com','cdn.openai.com','chatgpt.com/backend-api/files','download','attachment','asset','image']) or re.search(r'\.(png|jpe?g|webp|gif|svg|zip|json|txt|html|js|css|mp3|wav|ogg|mp4)(?:\?|$)',low)
+              if not plausible: continue
+              try:
+                  req=urllib.request.Request(u,headers=headers)
+                  with urllib.request.urlopen(req,timeout=90) as r:
+                      body=r.read()
+                      ctype=r.headers.get('content-type','')
+                      cd=r.headers.get('content-disposition','')
+                  parsed=urllib.parse.urlparse(u)
+                  name=pathlib.Path(parsed.path).name or f'asset_{idx}'
+                  m=re.search(r'filename\*?=(?:UTF-8\'\')?[\"\']?([^\"\';]+)',cd,re.I)
+                  if m: name=urllib.parse.unquote(m.group(1))
+                  name=re.sub(r'[^A-Za-z0-9._-]+','_',name)[:160]
+                  if '.' not in name:
+                      ext={'image/png':'.png','image/jpeg':'.jpg','image/webp':'.webp','image/gif':'.gif','image/svg+xml':'.svg','application/zip':'.zip','application/json':'.json','text/html':'.html','text/plain':'.txt','audio/mpeg':'.mp3','audio/wav':'.wav','audio/ogg':'.ogg','video/mp4':'.mp4'}.get(ctype.split(';')[0].strip(),'')
+                      name += ext
+                  digest=hashlib.sha256(u.encode()).hexdigest()[:10]
+                  out=root/'assets'/f'{idx:03d}_{digest}_{name}'
+                  out.write_bytes(body)
+                  log.append({'url':u,'json_path':path,'file':str(out),'bytes':len(body),'content_type':ctype,'ok':True})
+              except Exception as e:
+                  log.append({'url':u,'json_path':path,'error':repr(e),'ok':False})
+          (root/'download-log.json').write_text(json.dumps(log,indent=2,ensure_ascii=False),'utf-8')
+          (root/'summary.txt').write_text(f'messages={len(messages)}\nurls={len(unique)}\ndownloaded={sum(1 for x in log if x.get("ok"))}\n','utf-8')
+          PY
+
+          find export -type f -printf '%p %s bytes\n' | sort > export/file-list.txt
+          cat export/summary.txt
+
+      - name: Upload export
+        uses: actions/upload-artifact@v4
+        with:
+          name: Astral-Nine-Shared-Chat-Export
+          path: export/
+          if-no-files-found: error
+          retention-days: 3
